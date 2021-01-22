@@ -1,0 +1,4 @@
+dgl>=0.5.0
+torch~=1.7.1
+networkx~=2.5
+matplotlib~=3.3.3
