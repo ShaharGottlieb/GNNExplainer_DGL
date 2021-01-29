@@ -1,18 +1,20 @@
-from functools import partial
-import copy
 from math import sqrt
 from tqdm import tqdm
 import numpy as np
 import dgl
 import torch
 import torch.nn as nn
-from model import GCN
-from visualize import display_graph
+import networkx as nx
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+
+ORIGINAL_ID = '_explainer_original_id'
+EDGE_MASK = '_explainer_edge_mast'
 
 
 # UDF for message passing. this will execute after all the previous messages, and mask the final massage.
 def mask_message(edges):
-    return {'m': edges.data['m'] * edges.data['edge_mask'].sigmoid().view(-1, 1)}
+    return {'m': edges.data['m'] * edges.data[EDGE_MASK].sigmoid().view(-1, 1)}
 
 
 # workaround to hijack the "update_all" function of DGL
@@ -28,18 +30,28 @@ class GNNExplainer:
     """
     # hyper parameters, taken from the original paper
     params = {
-        'edge_size': 0.3,  # 0.005,
+        'edge_size': 0.35,  # 0.005,
         'feat_size': 1.0,
         'edge_ent': 1.0,
         'feat_ent': 0.1,
         'eps': 1e-15
     }
 
-    def __init__(self, graph, model, num_hops, epochs: int = 100, lr: float = 0.01):
+    def __init__(self, graph: dgl.DGLGraph, model: nn.Module, num_hops: int, epochs: int = 100, lr: float = 0.01,
+                 mask_threshold: float = 0.5):
+        """
+        :param graph: dgl base graph
+        :param model: model to explain
+        :param num_hops: number of message passing layers in model
+        :param epochs: number of epochs to optimize explainer
+        :param lr: learning rate
+        :param mask_threshold: threshold for hard-mask at return
+        """
         self.g: dgl.DGLGraph = graph
         self.model = model
         self.epochs = epochs
         self.lr = lr
+        self.threshold = mask_threshold
         self.num_hops = num_hops
         self.feature_mask = None
         for module in self.model.modules():
@@ -52,14 +64,14 @@ class GNNExplainer:
         self.feature_mask = nn.Parameter(torch.randn(num_feat) * 0.1)
 
         std = nn.init.calculate_gain('relu') * sqrt(2.0 / (2 * g.num_nodes()))
-        g.edata['edge_mask'] = nn.Parameter(torch.randn(g.num_edges()) * std)
+        g.edata[EDGE_MASK] = nn.Parameter(torch.randn(g.num_edges()) * std)
 
     def __loss__(self, g, node_idx, log_logits, pred_label):
         # prediction loss
         loss = -log_logits[node_idx, pred_label[node_idx]]
 
         # edge loss
-        me = g.edata['edge_mask'].sigmoid()
+        me = g.edata[EDGE_MASK].sigmoid()
         loss = loss + torch.sum(me) * self.params['edge_size']  # edge regularization - subgraph size
         entropy = -me * torch.log(me + self.params['eps']) - (1 - me) * torch.log(1 - me + self.params['eps'])
         loss = loss + self.params['edge_ent'] * entropy.mean()  # edge los: entropy + regularization
@@ -96,6 +108,7 @@ class GNNExplainer:
         eid_list = list(np.unique(np.array([eid_list])))
         # sub_g = dgl.node_subgraph(self.g, nodes)
         sub_g = dgl.edge_subgraph(self.g, eid_list)  # TODO - handle heterogeneous graphs
+        sub_g.ndata[ORIGINAL_ID] = sub_g.ndata[dgl.NID]
         return sub_g
 
     def explain_node(self, node_idx):
@@ -110,8 +123,8 @@ class GNNExplainer:
 
         # create initial subgraph (all nodes and edges that contribute to the explanation)
         subgraph = self._create_subgraph(node_idx)
-        new_node_id = np.where(subgraph.ndata[dgl.NID] == node_idx)[0][0]
-        pred_label = pred_label[subgraph.ndata[dgl.NID]]
+        new_node_id = np.where(subgraph.ndata[ORIGINAL_ID] == node_idx)[0][0]
+        pred_label = pred_label[subgraph.ndata[ORIGINAL_ID]]
 
         # "trick" the graph so we can hijack its calls
         original_graph_class = subgraph.__class__
@@ -125,7 +138,7 @@ class GNNExplainer:
         subgraph.to(device)
 
         # start optimizing
-        optimizer = torch.optim.Adam([self.feature_mask, subgraph.edata['edge_mask']], lr=self.lr)
+        optimizer = torch.optim.Adam([self.feature_mask, subgraph.edata[EDGE_MASK]], lr=self.lr)
 
         pbar = tqdm(total=self.epochs)
         pbar.set_description('Explaining node {}'.format(node_idx))
@@ -140,61 +153,77 @@ class GNNExplainer:
             # print(loss.detach())
             pbar.update(1)
         pbar.close()
-
-        node_feat_mask = self.feature_mask.detach().sigmoid()
-        edge_mask = subgraph.edata['edge_mask'].detach().sigmoid()
         subgraph.__class__ = original_graph_class
-        return subgraph, node_feat_mask, edge_mask
 
-    def test_explanation(self, node_id, subgraph, feat_mask, edge_mask, threshold=None):
+        # get hard node feature mask and edge mask
+        node_feat_mask = self.feature_mask.detach().sigmoid() > self.threshold
+        edge_mask = subgraph.edata[EDGE_MASK].detach().sigmoid()
+        subgraph.remove_edges(np.where(edge_mask < self.threshold)[0])
+        # remove isolated nodes from subgraph
+        isolated_nodes = np.where((subgraph.in_degrees() == 0) & (subgraph.out_degrees() == 0))[0]
+        subgraph.remove_nodes(isolated_nodes)
+        return subgraph, node_feat_mask
+
+    def test_explanation(self, node_id, subgraph, feat_mask):
+        """ print explanation results- reduced size, and accuracy
+        :param node_id: original node id which we explained
+        :param subgraph: result from GNNExplainer.explain_node
+        :param feat_mask: result from GNNExplainer.explain_node
+        """
+        # get node prediction for original task
         log_logit_original, label_original = self._predict(self.g, self.model, node_id)
-        num_edges_original = subgraph.num_edges()
-        num_feat_original = torch.numel(feat_mask)
-        new_node_id = np.where(subgraph.ndata[dgl.NID] == node_id)[0][0]
-
-        if threshold is None:
-            original_graph_class = subgraph.__class__
-            subgraph.__class__ = ExplainGraph
-            subgraph.edata['edge_mask'] = edge_mask.logit()  # need inverse of sigmoid to work with the soft mask
-            log_logit, label = self._predict(subgraph, self.model, new_node_id, feat_mask)
-            subgraph.__class__ = original_graph_class
-            num_feat = num_feat_original
-        else:
-            subgraph.remove_edges(np.where(edge_mask < threshold)[0])
-            for module in self.model.modules():
-                if hasattr(module, '_allow_zero_in_degree'):
-                    module._allow_zero_in_degree = True
-            feat_mask_hard = feat_mask > threshold
-            log_logit, label = self._predict(subgraph, self.model, new_node_id, feat_mask_hard)
-            num_feat = feat_mask_hard.sum()
-
-        print("num edges before masking: {}".format(num_edges_original))
-        print("num edges after masking: {}".format(subgraph.num_edges()))
-        print("num features before masking: {}".format(num_feat_original))
-        print("num features after masking: {}".format(num_feat))
+        # mapping to new subgraph node id
+        new_node_id = np.where(subgraph.ndata[ORIGINAL_ID] == node_id)[0][0]
+        # current prediction results
+        log_logit, label = self._predict(subgraph, self.model, new_node_id, feat_mask)
+        # create subgraph needed for computation, for size reference
+        origin_sub_g = self._create_subgraph(node_id)
+        # print results
+        print("subgraph size before masking (V,E)=({}, {})".format(origin_sub_g.num_nodes(), origin_sub_g.num_edges()))
+        print("subgraph size after masking  (V,E)=({}, {})".format(subgraph.num_nodes(), subgraph.num_edges()))
+        print("num features before masking: {}".format(torch.numel(feat_mask)))
+        print("num features after masking: {}".format(feat_mask.sum()))
         print("log_logits before masking: {}".format(log_logit_original))
         print("log_logits after masking: {}".format(log_logit))
         print("label before masking: {}".format(label_original))
         print("label after masking: {}".format(label))
 
+    def _visualize(self, subgraph):
+        num_classes = torch.numel(torch.unique(self.g.ndata['label']))
+        nx_g = dgl.to_networkx(subgraph, node_attrs=['label', ORIGINAL_ID])
+        mapping = {i: nx_g.nodes[i][ORIGINAL_ID].item() for i in nx_g.nodes.keys()}
+        nx_g = nx.relabel_nodes(nx_g, mapping)
+        node_labels = [node['label'].item() for node in nx_g.nodes.values()]
 
-def f1():
-    dataset = dgl.data.CoraGraphDataset()
-    print('Number of categories:', dataset.num_classes)
-    g = dataset[0]
+        cmap = plt.get_cmap('cool', num_classes)
+        cmap.set_under('gray')
 
-    model = torch.load("model.p")
-    print(model)
-    num_hops = 2
-    node_id = 11
-    threshold = 0.5
+        node_kwargs = {'node_size': 400, 'cmap': cmap, 'node_color': node_labels}
+        label_kwargs = {'font_size': 10}
 
-    explainer = GNNExplainer(g, model, num_hops, epochs=200)
-    subgraph, feat_mask, edge_mask = explainer.explain_node(node_id)
-    explainer.test_explanation(node_id, copy.deepcopy(subgraph), feat_mask, edge_mask, threshold)
-    display_graph(subgraph)
-    subgraph.remove_edges(np.where(edge_mask < threshold)[0])
-    display_graph(subgraph)
+        pos = nx.spring_layout(nx_g)
+        ax = plt.gca()
+        for source, target, data in nx_g.edges(data=True):
+            ax.annotate(
+                '', xy=pos[target], xycoords='data', xytext=pos[source],
+                textcoords='data', arrowprops=dict(
+                    arrowstyle="->",
+                    alpha=1.0,  # max(data['att'], 0.1), # TODO - change for transparent visualization mode
+                    shrinkA=sqrt(node_kwargs['node_size']) / 2.0,
+                    shrinkB=sqrt(node_kwargs['node_size']) / 2.0,
+                    connectionstyle="arc3,rad=0.1",
+                ))
+        nx.draw_networkx_labels(nx_g, pos, **label_kwargs)
+        nx.draw_networkx_nodes(nx_g, pos, **node_kwargs)
+        patch_list = [mpatches.Patch(color=cmap(i), label=i) for i in range(num_classes)]
+        ax.legend(handles=patch_list, title="Label", loc=1)
+        plt.show()
 
-
-f1()
+    def visualize(self, subgraph, node_id):
+        """
+        visualize explanation
+        :param subgraph: result from GNNExplainer.explain_node
+        :param node_id: node id used to explain
+        """
+        self._visualize(self._create_subgraph(node_id))
+        self._visualize(subgraph)
