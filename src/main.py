@@ -1,29 +1,14 @@
-import dgl
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import dgl.data
-from dgl.nn import GraphConv
-
-
-class GCN(nn.Module):
-    def __init__(self, in_feats, h_feats, num_classes):
-        super(GCN, self).__init__()
-        self.conv1 = GraphConv(in_feats, h_feats)
-        self.conv2 = GraphConv(h_feats, num_classes)
-
-    def forward(self, g, in_feat):
-        h = self.conv1(g, in_feat)
-        h = F.relu(h)
-        h = self.conv2(g, h)
-        return h
+from model import GCN as GCN
 
 
 def train(g, model):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     best_val_acc = 0
     best_test_acc = 0
-
+    g.edata['mask'] = torch.ones(g.num_edges())
     features = g.ndata['feat']
     labels = g.ndata['label']
     train_mask = g.ndata['train_mask']
@@ -34,7 +19,7 @@ def train(g, model):
         logits = model(g, features)
 
         # Compute prediction
-        pred = logits.argmax(1)
+        pred = logits.argmax(dim=-1)
 
         # Compute loss
         # Note that you should only compute the losses of the nodes in the training set.
@@ -60,7 +45,7 @@ def train(g, model):
                 e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
 
 
-dataset = dgl.data.CiteseerGraphDataset()
+dataset = dgl.data.CoraGraphDataset()
 print('Number of categories:', dataset.num_classes)
 g = dataset[0]
 
@@ -71,3 +56,5 @@ print(g.edata)
 
 model = GCN(g.ndata['feat'].shape[1], 16, dataset.num_classes)
 train(g, model)
+
+torch.save(model, "model.p")
