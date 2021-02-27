@@ -1,10 +1,8 @@
 import torch
 import torch.nn.functional as F
-import dgl.data
-from model import GCN as GCN
 
 
-def train(g, model):
+def train(g, model, num_epochs=100):
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     best_val_acc = 0
     best_test_acc = 0
@@ -14,7 +12,7 @@ def train(g, model):
     train_mask = g.ndata['train_mask']
     val_mask = g.ndata['val_mask']
     test_mask = g.ndata['test_mask']
-    for e in range(100):
+    for e in range(num_epochs):
         # Forward
         logits = model(g, features)
 
@@ -43,18 +41,3 @@ def train(g, model):
         if e % 5 == 0:
             print('In epoch {}, loss: {:.3f}, val acc: {:.3f} (best {:.3f}), test acc: {:.3f} (best {:.3f})'.format(
                 e, loss, val_acc, best_val_acc, test_acc, best_test_acc))
-
-
-dataset = dgl.data.CoraGraphDataset()
-print('Number of categories:', dataset.num_classes)
-g = dataset[0]
-
-print('Node features')
-print(g.ndata)
-print('Edge features')
-print(g.edata)
-
-model = GCN(g.ndata['feat'].shape[1], 16, dataset.num_classes)
-train(g, model)
-
-torch.save(model, "model.p")
