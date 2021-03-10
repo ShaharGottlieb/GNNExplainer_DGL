@@ -100,7 +100,7 @@ class GNNExplainer:
         loss = loss + torch.mean(mn) * self.params['feat_size']  # node feature regularization
         entropy = -mn * torch.log(mn + self.params['eps']) - (1 - mn) * torch.log(1 - mn + self.params['eps'])
         loss = loss + self.params['feat_ent'] * entropy.mean()  # node feature los: entropy + regularization
-        #print(log_logits, loss)
+        # print(log_logits, loss)
         return loss
 
     def _predict(self, graph, model, node_id, feat_mask=None):

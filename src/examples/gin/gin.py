@@ -14,6 +14,15 @@ from gin_model import GIN
 from GNNExplainer import GNNExplainer
 from GNNExplainer import ExplainerTags
 
+"""
+This code was taken from DGL public examples
+
+How Powerful are Graph Neural Networks
+https://arxiv.org/abs/1810.00826
+https://openreview.net/forum?id=ryGs6iA5Km
+Author's implementation: https://github.com/weihua916/powerful-gnns
+"""
+
 
 def train(args, net, trainloader, optimizer, criterion, epoch):
     net.train()
@@ -154,7 +163,7 @@ class Args:
     neighbor_pooling_type = "sum"
     learn_eps = False
     seed = 0
-    epochs = 80
+    epochs = 100
     lr = 0.001
     final_dropout = 0.5
     disable_cuda = True
@@ -176,12 +185,11 @@ if __name__ == '__main__':
         model.load_state_dict(torch.load("gin_model.p"))
     model.eval()
     num_hops = args.num_layers - 1
-
-    #g = dataset.graphs[176]
-    g = dataset.graphs[178]
+    graph_label = 178
+    g = dataset.graphs[graph_label]
     g.ndata[ExplainerTags.NODE_FEATURES] = g.ndata['attr'].float().to(torch.device("cpu"))
-    explainer = GNNExplainer(g, model, num_hops, epochs=50, edge_size=0.05, feat_size=0)
+    explainer = GNNExplainer(g, model, num_hops, epochs=100, edge_size=0.05, feat_size=0)
     subgraph, feat_mask = explainer.explain_node(None)
     explainer.test_explanation(None, subgraph, feat_mask)
     label_mapping = {0: 'C', 1: 'N', 2: 'O', 3: 'F', 4: 'I', 5: 'Cl', 6: 'Br'}
-    explainer.visualize(subgraph, None, label_mapping, "Mutagenic label {}".format(dataset.labels[42]))
+    explainer.visualize(subgraph, None, label_mapping, "Mutagenic label {}".format(dataset.labels[graph_label]))

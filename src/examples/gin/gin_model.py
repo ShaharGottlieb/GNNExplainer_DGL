@@ -1,4 +1,6 @@
 """
+This code was taken from DGL public examples
+
 How Powerful are Graph Neural Networks
 https://arxiv.org/abs/1810.00826
 https://openreview.net/forum?id=ryGs6iA5Km

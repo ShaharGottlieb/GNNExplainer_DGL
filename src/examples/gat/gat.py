@@ -2,6 +2,7 @@
 Graph Attention Networks in DGL using SPMV optimization.
 Multiple heads are also batched together for faster training.
 References
+This code was taken from DGL public examples
 ----------
 Paper: https://arxiv.org/abs/1710.10903
 Author's code: https://github.com/PetarV-/GAT

@@ -1,4 +1,6 @@
 """
+This code was taken from DGL public examples
+
 Graph Attention Networks in DGL using SPMV optimization.
 References
 ----------
